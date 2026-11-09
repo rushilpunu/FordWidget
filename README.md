@@ -106,6 +106,14 @@ Examples: `buttons -photo` · `fuel tires` · `lock oil odometer`
 
 From 9 PM (you can change this or turn it off in Customize), the first widget refresh reads the vehicle's last reported state once. It doesn't wake the vehicle, and it sends you a notification if something needs attention. iOS decides exactly when widgets refresh, so the timing is approximate. It runs inside the widget; no Shortcuts automation is needed.
 
+The optional “all good” notice requires explicit Locked and Closed readings, each with its own measurement timestamp within the past five minutes. A fresh overall response time is not enough. Missing, unknown or older lock/door readings produce a limited-status notice instead; reported problems still trigger alerts.
+
+### Door and lock readings
+
+Door and lock components keep their individual measurement times in the local cache. Newer readings replace that same component before the overall status is calculated; partial responses retain previously reported components. An unchanged old hood reading therefore does not prevent a newer door transition from updating the status. Unknown components stay unknown, and fetch time never becomes measurement time. A whole-vehicle `ALL_DOORS` lock reading cannot be cleared or made newer by one individually locked door.
+
+Older caches contain only the overall door/lock state. If an older Ajar or Unlocked report cannot be attributed to a component, a later partial closed/locked response shows Unknown rather than assuming the unresolved component is safe. The uncertainty remains until a sufficiently dated whole-vehicle report resolves it; newer individual unsafe readings still show Ajar/Unlocked. This migration does not require clearing the cache, and an unresolved prior Ajar continues to block remote start. Previously healthy aggregate readings retain their original state and time unless newer contrary evidence arrives.
+
 ## Security & privacy
 
 **Please read before installing.**
@@ -121,7 +129,7 @@ From 9 PM (you can change this or turn it off in Customize), the first widget re
   - `api.autonomic.ai` is Ford's vehicle cloud, used for status and commands.
   - `api.open-meteo.com` is used only for the remote‑start temperature line, and only when the vehicle's own reading is over 2 hours old. It receives the location rounded to about 1 km, with no account.
 - **Links can trigger a command prompt.** A web page or QR code can open a `scriptable://` link to this script, which is why every command shows a confirmation alert. Only tap **Send command** if you started it.
-- **Parked location** is stored on the phone only. Turn it off in Customize widgets.
+- **Parked location** is stored on the phone only. Turning it off in Customize widgets erases saved coordinates (your Home spot stays until you clear it).
 - **To revoke access:** choose **Sign out of Ford**, then change your Ford password. Changing the password signs out all sessions.
 - **When asking for help,** don't post your VIN, location, or screenshots of View details. Error messages never contain tokens or passwords.
 - **Remote start safety:** only start the vehicle when it's parked outdoors, never in a garage.
@@ -149,6 +157,10 @@ Menu › **Sign out of Ford**, then delete the script and the `FordWidget` folde
 ## Credits
 
 Ford login and API details are based on [marq24/ha-fordpass](https://github.com/marq24/ha-fordpass), [marq24/ha-fordconnect-query](https://github.com/marq24/ha-fordconnect-query) and [itchannel/fordpass-ha](https://github.com/itchannel/fordpass-ha). Thanks to their authors.
+
+## Running tests
+
+The tests live in `tests/` and need Node 18 or newer. Run them with `node --test tests/`. They are offline: the Scriptable APIs are mocked and nothing contacts Ford. You don't need them on the phone.
 
 ## License
 
