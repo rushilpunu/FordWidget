@@ -949,6 +949,7 @@ class FordAPIClient {
   }
   async getVehicleStatus() {
     this.store.assertLease();
+    if (!parkedLocationEnabled(this.prefs) || !parkedLocationEnabled()) this.store.purgeLocation();
     let c = this.store.read();
     if (!c || c.vin !== this.prefs.vin) c = { version: 1, vin: this.prefs.vin, fields: {} };
     if (c.nextFetch > now()) return { cache: c, note: 'Cloud reads are cooling down. Showing cached data.' };
@@ -1496,6 +1497,16 @@ class WidgetRenderer {
   }
 }
 
+// Settings dialogs can outlive their foreground session while awaiting input.
+function saveVehiclePreferences(store, prefs) {
+  requireApp(); store.assertLease();
+  const current = secretGet('vehicle');
+  if (!current || !prefs || current.vin !== prefs.vin)
+    throw new Error('The configured vehicle changed. Run the script again.');
+  secretSet('vehicle', prefs);
+  if (!parkedLocationEnabled(prefs)) store.purgeLocation();
+}
+
 class AppController {
   constructor() { this.store = new LocalStore(); this.auth = new FordAuthManager(this.store); }
   async setupVehicle() {
@@ -1560,9 +1571,9 @@ class AppController {
           }
         }
       }
-      prefs.widget = Object.assign({}, cfg, { show }); prefs.compatibility = { commands, verified }; secretSet('vehicle', prefs);
+      prefs.widget = Object.assign({}, cfg, { show }); prefs.compatibility = { commands, verified }; saveVehiclePreferences(this.store, prefs);
     }
-    prefs.widget = Object.assign({}, cfg, { show }); prefs.compatibility = { commands, verified }; secretSet('vehicle', prefs);
+    prefs.widget = Object.assign({}, cfg, { show }); prefs.compatibility = { commands, verified }; saveVehiclePreferences(this.store, prefs);
   }
   async details(prefs) {
     const c = this.store.read() || {}, f = c.fields || {};
@@ -1692,7 +1703,7 @@ class AppController {
       else await preview.presentLarge();
       const confirm = new Alert(); confirm.title = `Use ${design}?`; confirm.message = `Apply this design to ${family} widgets. You can change it again later.`;
       confirm.addAction('Use design'); confirm.addCancelAction('Keep current');
-      if (await confirm.presentAlert() === 0) { prefs.widget = previewPrefs.widget; secretSet('vehicle', prefs); return; }
+      if (await confirm.presentAlert() === 0) { prefs.widget = previewPrefs.widget; saveVehiclePreferences(this.store, prefs); return; }
     }
   }
   async alertOptions(prefs) {
@@ -1718,7 +1729,7 @@ class AppController {
         if (n === null || n < 0 || n > max) { await message('Invalid threshold', `Enter a number from 0 to ${max}.`); continue; }
         next[key] = n;
       } else next.attention = !settings.attention;
-      prefs.alerts = next; secretSet('vehicle', prefs);
+      prefs.alerts = next; saveVehiclePreferences(this.store, prefs);
     }
   }
   async customize(prefs) {
@@ -1750,8 +1761,7 @@ class AppController {
         prefs.night = Object.assign({}, prefs.night, nxt === null ? { enabled: false } : { enabled: true, hour: nxt });
       }
       if (i === keys.length + 3) prefs.night = Object.assign({}, prefs.night, { notifyOk: !night.notifyOk });
-      secretSet('vehicle', prefs);
-      if (!parkedLocationEnabled(prefs)) this.store.purgeLocation();
+      saveVehiclePreferences(this.store, prefs);
       const r = () => new WidgetRenderer(prefs, this.store.read());
       if (i === keys.length + 4) await r().build('small').presentSmall();
       if (i === keys.length + 5) await r().build('medium').presentMedium();

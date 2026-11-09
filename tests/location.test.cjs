@@ -25,6 +25,63 @@ test('turning Parked location off erases both cache copies, keeps other data, an
   app.store.release();
 });
 
+test('Vehicle features immediately purges both copies when disabling location or saving an existing opt-out', async () => {
+  for (const scenario of ['toggle-off', 'already-off']) {
+    const h = load(), vehicle = prefs(scenario === 'already-off' ? { widget: { show: { parked: false } } } : {});
+    const app = await prepared(h, vehicle, located());
+    seed(h, app);
+    if (scenario === 'toggle-off') {
+      for (const suffix of ['', '.bak']) {
+        const snapshot = JSON.parse(h.state.files.get(app.store.path + suffix));
+        snapshot.nextFetch = TIME + 60000;
+        h.state.files.set(app.store.path + suffix, JSON.stringify(snapshot));
+      }
+    } else {
+      for (const name of ['mobile', 'autonomic']) h.api.secretRemove('token.' + name);
+    }
+    const tokens = [...h.state.secrets].filter(([key]) => key.includes('token.'));
+    let menus = 0;
+    const present = h.context.Alert.prototype.presentSheet;
+    h.context.Alert.prototype.presentSheet = async function() {
+      if (this.title === 'Vehicle features' && ++menus === 2) {
+        assert.equal(h.api.secretGet('vehicle').widget.show.parked, false);
+        cleanFiles(h, app); // The toggle must purge before the next prompt, not only on Done.
+      }
+      return present.call(this);
+    };
+    h.state.choices.push('OK', 'OK', ...(scenario === 'toggle-off' ? ['✓ Parked location · reported', -1] : [-1]));
+    await app.compatibility(vehicle);
+    assert.equal(h.state.choices.length, 0);
+    assert.equal(h.api.secretGet('vehicle').widget.show.parked, false);
+    cleanFiles(h, app);
+    for (const suffix of ['', '.bak']) assert.equal(JSON.parse(h.state.files.get(app.store.path + suffix)).fields.fuel.value, 53);
+    assert.deepEqual([...h.state.secrets].filter(([key]) => key.includes('token.')), tokens);
+    assert.equal(h.state.requests.length + h.state.geocodes.length + h.state.safari.length, 0);
+    app.store.release();
+  }
+});
+
+test('a cooling-down telemetry read physically purges disabled location from both raw cache files', async () => {
+  const h = load(), vehicle = prefs({ widget: { show: { parked: false } } }), app = await prepared(h, vehicle);
+  seed(h, app);
+  for (const suffix of ['', '.bak']) {
+    const snapshot = JSON.parse(h.state.files.get(app.store.path + suffix));
+    snapshot.nextFetch = TIME + 60000;
+    h.state.files.set(app.store.path + suffix, JSON.stringify(snapshot));
+    assert.ok(snapshot.fields.position && snapshot.place, 'Start with raw on-disk coordinates in both files');
+  }
+  const tokens = [...h.state.secrets].filter(([key]) => key.includes('token.'));
+  const result = await new h.api.FordAPIClient(app.auth, app.store, vehicle).getVehicleStatus();
+  assert.match(result.note, /cooling down/);
+  clean(result.cache);
+  cleanFiles(h, app);
+  assert.equal(result.cache.fields.fuel.value, 53);
+  assert.equal(result.cache.nextFetch, TIME + 60000);
+  assert.deepEqual([...h.state.secrets].filter(([key]) => key.includes('token.')), tokens);
+  assert.equal(h.state.requests.length + h.state.geocodes.length + h.state.safari.length, 0);
+  app.store.release();
+});
+
 test('disabled location is hidden on primary and backup reads and by every consumer', async () => {
   const h = load(), vehicle = prefs({ widget: { show: { parked: false } } }), app = await prepared(h, vehicle);
   seed(h, app);
