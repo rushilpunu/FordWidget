@@ -941,30 +941,137 @@ function downscale(img, maxWidth) {
   return d.getImage();
 }
 
+const statusRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const statusChild = (value, key) => statusRecord(value) && Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+const statusID = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x20\x7f]/.test(value) ? value : null;
+function statusTelemetryRoot(raw, vin) {
+  const root = statusRecord(raw) && Object.prototype.hasOwnProperty.call(raw, 'vehicleStatus') ? raw.vehicleStatus : raw;
+  if (!statusRecord(raw) || !statusRecord(root)) throw new APIError('Status telemetry schema unsupported.');
+  for (const object of [raw, root]) for (const key of ['vin', 'VIN']) {
+    if (Object.prototype.hasOwnProperty.call(object, key) && (typeof object[key] !== 'string' || object[key].toUpperCase() !== vin))
+      throw new APIError('Status telemetry vehicle mismatch.');
+  }
+  if (!statusRecord(statusChild(root, 'metrics')) && !statusRecord(statusChild(root, 'states')))
+    throw new APIError('Status telemetry schema unsupported.');
+  return root;
+}
+const statusCommand = (raw, vin) => statusChild(statusChild(statusTelemetryRoot(raw, vin), 'states'), 'statusRefreshCommand');
+
 class FordAPIClient {
   constructor(auth, store, prefs) { this.auth = auth; this.store = store; this.prefs = prefs; }
+  refreshContext(vin, command = false) {
+    requireApp(); this.store.assertLease();
+    const configured = secretGet('vehicle'), cache = this.store.read();
+    if (typeof vin !== 'string' || vin.length !== 17 || !vinOK(vin) || this.prefs.vin !== vin || !configured ||
+        configured.vin !== vin || !cache || cache.vin !== vin || !statusRecord(cache.fields))
+      throw new APIError('Vehicle refresh session changed.');
+    if (command && [this.prefs, configured].some(prefs => prefs.compatibility && prefs.compatibility.commands && prefs.compatibility.commands.refresh === false))
+      throw new APIError('This command is disabled in Vehicle features.');
+    return cache;
+  }
+  async readGeneralStatus(vin, deadline = null) {
+    const previous = this.auth.timeout;
+    const check = () => {
+      this.refreshContext(vin);
+      if (deadline !== null) {
+        const remaining = deadline - now();
+        if (remaining <= 0) throw new APIError('Status read window ended.');
+        this.auth.timeout = Math.min(previous || SETTINGS.timeout, remaining / 1000);
+      }
+    };
+    try {
+      check(); const token = await this.auth.token('autonomic'); check();
+      const raw = await this.auth.request('telemetry.mobile', `${SETTINGS.autonomic}/telemetry/sources/fordpass/vehicles/${vin}`, 'GET', null, this.auth.mobileHeaders(token));
+      this.refreshContext(vin);
+      if (deadline !== null && now() > deadline) throw new APIError('Status read window ended.');
+      statusTelemetryRoot(raw, vin); return raw;
+    } finally { this.auth.timeout = previous; }
+  }
+  async requestGeneralStatus(confirmed = false) {
+    requireApp();
+    if (confirmed !== true) throw new APIError('Confirm the vehicle refresh in the app first.');
+    const vin = this.prefs && this.prefs.vin;
+    const messages = {
+      device_succeeded: 'Ford reports the matched status request succeeded. Individual reading times may still differ.',
+      device_failed: 'Ford reports the status request failed, expired or was canceled. It was not retried.',
+      accepted_unconfirmed: 'Ford accepted the status request; vehicle completion was not confirmed.',
+      delivery_uncertain: 'Status-request delivery is uncertain. It was not retried.',
+      cooldown: 'The status request is cooling down. No new request was sent.',
+      baseline_unavailable: 'The status baseline could not be read. No new request was sent.',
+      blocked: 'The refresh stopped because the configured vehicle, session or enabled features changed.'
+    };
+    const result = (outcome, dispatched = false, attemptAt = null) => {
+      if (attemptAt !== null) {
+        try { const cache = this.refreshContext(vin); cache.generalStatusRequest = { attemptAt, outcome }; this.store.write(cache); }
+        catch (_) { /* A displaced session cannot save a result. */ }
+      }
+      return { outcome, dispatched, message: messages[outcome] };
+    };
+    const available = () => {
+      const cache = this.refreshContext(vin, true);
+      this.auth.gate('commands'); this.auth.gate('commands.generalStatus');
+      return !(cache.commandAfter > now() || cache.wakeAfter > now());
+    };
+    try { this.refreshContext(vin, true); } catch (_) { return result('blocked'); }
+    try { if (!available()) return result('cooldown'); } catch (_) { return result('cooldown'); }
+    let token, baseline;
+    try { token = await this.auth.token('autonomic'); if (!available()) return result('cooldown'); baseline = await this.readGeneralStatus(vin); }
+    catch (_) { return result('baseline_unavailable'); }
+    const historicalID = statusID(statusChild(statusCommand(baseline, vin), 'commandId'));
+    let cache;
+    try { if (!available()) return result('cooldown'); cache = this.refreshContext(vin, true); }
+    catch (_) { return result('blocked'); }
+    const attemptAt = now();
+    cache.commandAfter = attemptAt + SETTINGS.commandInterval; cache.wakeAfter = attemptAt + SETTINGS.wakeInterval;
+    cache.generalStatusRequest = { attemptAt, outcome: 'dispatching' }; this.store.write(cache);
+    try { this.refreshContext(vin, true); } catch (_) { return result('blocked', false, attemptAt); }
+    let receipt;
+    try { receipt = await this.postCommand(vin, 'refresh', token); this.refreshContext(vin); }
+    catch (_) { return result('delivery_uncertain', true, attemptAt); }
+    const id = statusID(receipt && receipt.id);
+    if (!id || id === historicalID) return result('accepted_unconfirmed', true, attemptAt);
+    const deadline = now() + 40000;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (attempt) await new Promise(resolve => Timer.schedule(Math.min(5000, Math.max(0, deadline - now())), false, resolve));
+      if (now() >= deadline) break;
+      let raw;
+      try { raw = await this.readGeneralStatus(vin, deadline); }
+      catch (_) { break; }
+      const command = statusCommand(raw, vin);
+      if (statusChild(command, 'commandId') !== id) continue;
+      const input = statusChild(statusChild(command, 'value'), 'toState'), state = typeof input === 'string' && input.length <= 64 ? input.toUpperCase() : '';
+      if (state === 'SUCCESS') return result('device_succeeded', true, attemptAt);
+      if (['FAILURE', 'CANCELLED', 'EXPIRED'].includes(state)) return result('device_failed', true, attemptAt);
+    }
+    return result('accepted_unconfirmed', true, attemptAt);
+  }
   async mobileTelemetry() {
     const token = await this.auth.token('autonomic');
     return this.auth.request('telemetry.mobile', `${SETTINGS.autonomic}/telemetry/sources/fordpass/vehicles/${this.prefs.vin}`, 'GET', null, this.auth.mobileHeaders(token));
   }
-  async getVehicleStatus() {
+  async getVehicleStatus(force = false) {
+    const vin = this.prefs.vin, validate = () => { if (force) this.refreshContext(vin); };
+    validate();
     this.store.assertLease();
     let c = this.store.read();
     if (!c || c.vin !== this.prefs.vin) c = { version: 1, vin: this.prefs.vin, fields: {} };
-    if (c.nextFetch > now()) return { cache: c, note: 'Cloud reads are cooling down. Showing cached data.' };
+    if (!force && c.nextFetch > now()) return { cache: c, note: 'Cloud reads are cooling down. Showing cached data.' };
     c.nextFetch = now() + SETTINGS.fetchInterval; this.store.write(c);
     let official = {}, mobile = {}, errors = [];
     if (secretGet('token.official')) {
       try {
         const token = await this.auth.token('official');
+        validate();
         const raw = await this.auth.request('telemetry.official', SETTINGS.officialBase + '/telemetry', 'GET', null, { Authorization: `Bearer ${token}` });
+        validate();
         official = normalize(raw, this.prefs.vin, 'FordConnect', now());
-      } catch (e) { errors.push(e.message); }
+      } catch (e) { validate(); errors.push(e.message); }
     }
     if (Object.keys(official).length < Object.keys(FIELD_NAMES).length && secretGet('token.mobile')) {
-      try { mobile = normalize(await this.mobileTelemetry(), this.prefs.vin, 'FordPass', now()); }
-      catch (e) { errors.push(e.message); }
+      try { mobile = normalize(await (force ? this.readGeneralStatus(vin) : this.mobileTelemetry()), this.prefs.vin, 'FordPass', now()); validate(); }
+      catch (e) { validate(); errors.push(e.message); }
     }
+    validate();
     if (!Object.keys(official).length && !Object.keys(mobile).length) {
       c.notice = errors.join('\n') || 'Connect FordConnect or FordPass first.';
       this.store.write(c); return { cache: c, note: c.notice + '\nShowing cached data.' };
@@ -1046,7 +1153,8 @@ class FordAPIClient {
   }
   async postCommand(vin, command, token) {
     this.store.assertLease();
-    const data = await this.auth.request('commands', `${SETTINGS.autonomic}/command/vehicles/${vin}/commands`, 'POST',
+    const scope = command === 'refresh' ? 'commands.generalStatus' : 'commands';
+    const data = await this.auth.request(scope, `${SETTINGS.autonomic}/command/vehicles/${vin}/commands`, 'POST',
       { properties: {}, tags: {}, type: COMMANDS[command], wakeUp: true }, this.auth.mobileHeaders(token));
     return this.receipt(data);
   }
@@ -1055,6 +1163,7 @@ class FordAPIClient {
     if (vin !== this.prefs.vin || !vinOK(vin) || !Object.prototype.hasOwnProperty.call(COMMANDS, command)) throw new Error('Invalid VIN or command.');
     const token = await this.auth.token('autonomic');
     this.auth.gate('commands');
+    if (command === 'refresh') this.auth.gate('commands.generalStatus');
     let c = this.store.read() || { version: 1, vin, fields: {} };
     if (c.vin !== vin) throw new Error('Cache vehicle mismatch.');
     if (c.commandAfter > now()) throw new Error('A command was just sent. Wait at least 30 seconds.');
@@ -1267,7 +1376,7 @@ class WidgetRenderer {
       const row = grid.addStack(); row.spacing = 6;
       for (const [action, label, icon] of actions.slice(i, i + cols)) {
         const b = row.addStack(); b.layoutVertically(); b.size = new Size(w, h); b.centerAlignContent();
-        b.backgroundColor = this.panel; b.cornerRadius = 10; b.url = this.url(action);
+        b.backgroundColor = this.panel; b.cornerRadius = 10; b.url = this.url(action === 'refresh' ? 'refreshwidget' : action);
         const top = b.addStack(); top.addSpacer(); this.symbol(top, icon, 15); top.addSpacer();
         b.addSpacer(3);
         const bottom = b.addStack(); bottom.addSpacer(); this.text(bottom, label, 10, true); bottom.addSpacer();
@@ -1771,8 +1880,61 @@ class AppController {
     try { await n.schedule(); } catch (_) { /* The foreground alert remains available if notifications are denied. */ }
     await message('FordWidget', body);
   }
+  async refreshWidget(prefs) {
+    requireApp();
+    const client = new FordAPIClient(this.auth, this.store, prefs), vin = prefs && prefs.vin, steps = {};
+    const validate = () => client.refreshContext(vin, true);
+    const cooling = cache => typeof cache.widgetRefreshAfter === 'number' && Number.isFinite(cache.widgetRefreshAfter) && cache.widgetRefreshAfter > now();
+    let attemptAt = null;
+    const finish = async (outcome, body) => {
+      try {
+        const current = client.refreshContext(vin);
+        if (attemptAt !== null) {
+          current.widgetRefreshLast = { attemptAt, outcome, steps: Object.assign({}, steps) }; this.store.write(current);
+        }
+        Script.setWidget(new WidgetRenderer(prefs, current).build('large'));
+      } catch (_) { /* A changed session must not write or render the old vehicle. */ }
+      await this.notify(body); return { outcome, steps, message: body };
+    };
+    const initial = validate();
+    if (cooling(initial)) return finish('cooldown', 'Widget refresh is cooling down. No read or vehicle request was sent. Showing saved readings.');
+    const confirm = new Alert(); confirm.title = 'Refresh vehicle data?';
+    confirm.message = 'Request one vehicle status update, then read Ford\'s latest available data. This may wake connected electronics; it does not start or stop the engine. Keep Scriptable open while it finishes. Existing cooldowns apply, and reading times may remain unchanged.';
+    confirm.addAction('Refresh widget'); confirm.addCancelAction('Cancel');
+    if (await confirm.presentAlert() < 0) return { outcome: 'cancelled', steps, message: 'Canceled.' };
+    try {
+      const current = validate();
+      if (cooling(current)) return finish('cooldown', 'Widget refresh is cooling down. No read or vehicle request was sent. Showing saved readings.');
+      attemptAt = now(); current.widgetRefreshAfter = attemptAt + 60000;
+      current.widgetRefreshLast = { attemptAt, outcome: 'in_progress', steps: {} }; this.store.write(current);
+    } catch (_) { return finish('blocked', 'Refresh stopped before dispatch because the configured vehicle, session or enabled features changed.'); }
+    let commandMessage;
+    try {
+      if (secretGet('token.mobile')) {
+        try {
+          const result = await client.requestGeneralStatus(true);
+          steps.generalStatus = result.outcome; commandMessage = result.message;
+        } catch (_) {
+          steps.generalStatus = 'unconfirmed'; commandMessage = 'The status-request outcome is unconfirmed. It was not retried.';
+        }
+      } else {
+        steps.generalStatus = 'requires_fordpass'; commandMessage = 'Requesting new vehicle status requires FordPass. Available cloud sources were still checked.';
+      }
+      validate();
+      try {
+        const result = await client.getVehicleStatus(true), note = result && result.note || '';
+        steps.telemetry = note.startsWith('Cloud telemetry saved.') ? 'saved' :
+          note.startsWith('Some sources failed; available telemetry was saved.') ? 'partial' : 'cached_or_unavailable';
+      } catch (_) { steps.telemetry = 'failed'; }
+      validate();
+    } catch (_) { return finish('blocked', 'Refresh stopped because the configured vehicle, session or enabled features changed. Available completed results were kept.'); }
+    const readingMessage = steps.telemetry === 'saved' ? 'Available vehicle telemetry was saved.' : steps.telemetry === 'partial' ?
+      'Available telemetry was saved; some cloud sources failed.' : 'The cloud readback was unavailable; saved readings were retained.';
+    return finish('completed', commandMessage + '\n' + readingMessage + '\nReadings keep Ford\'s reported measurement times.');
+  }
   async action(action, prefs, compatibilityTest = false) {
     const api = new FordAPIClient(this.auth, this.store, prefs);
+    if (action === 'refreshwidget') return this.refreshWidget(prefs);
     if (action === 'photo') { await this.truckPhoto(prefs); return; }
     if (action === 'parked') { await this.parked(prefs); return; }
     if (action === 'fetch') {

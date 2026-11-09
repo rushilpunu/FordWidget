@@ -83,6 +83,8 @@ Tap any widget to open the menu:
 
 Widget buttons (Lock, Unlock, Start, Refresh) open Scriptable and ask for confirmation before anything is sent.
 
+The widget's **Refresh** button requests vehicle status once, checks the matching command result for up to 40 seconds, then reads available cloud telemetry. It keeps Ford's measurement times and retains saved readings when a source fails. Repeated full refreshes are limited to once per minute; the existing 30-second command spacing, 15-minute wake limit and server cooldowns still apply. **Wake / refresh** remains available in the menu.
+
 > A command's receipt means Ford **accepted** it, not that the vehicle finished it. Fetch telemetry a minute later to confirm.
 
 ### Customizing
