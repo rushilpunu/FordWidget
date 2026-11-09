@@ -75,6 +75,7 @@ Tap any widget to open the menu:
 | View details | Every reading with its time and source. |
 | Parked location | Open in Maps, or save the spot as **Home**. The widget then says "Parked · Home". |
 | Customize widgets | Choose what all widgets show, tire units, evening check time, and previews. |
+| Units & formats | Choose US/Metric display and independent Auto, PSI, kPa or bar tire pressure. |
 | Widget gallery | Preview Classic, Showcase, and Dashboard designs and select one separately for each widget size. |
 | Alerts & attention | Choose evening alert conditions, thresholds and the optional Home Screen attention indicator. |
 | Vehicle photo | Ford's photo from another angle, your own photo, or a plain icon. |
@@ -94,14 +95,23 @@ Widget buttons (Lock, Unlock, Start, Refresh) open Scriptable and ask for confir
 | Word | Effect |
 |---|---|
 | `buttons` | Medium widget shows Lock / Unlock / Start / Refresh buttons |
-| `status` | Status‑only layout, no buttons |
+| `status` | Classic status layout without buttons; gallery designs may retain controls |
 | `fuel tires lock` … | Show **only** these items |
 | `-photo`, `-oil` … | Hide these items |
-| `bar` / `psi` | Tire pressure units |
+| `us` / `metric` | Override display preset for this widget |
+| `psi` / `kpa` / `bar` | Override tire pressure independently of the preset |
 
 Items: `photo`, `fuel`, `battery`, `tires`, `oil`, `lock`, `odometer`, `doors`, `temp`, `parked`.
 
 Examples: `buttons -photo` · `fuel tires` · `lock oil odometer`
+
+### Units and formats
+
+Choose **Units & formats** from the menu. US shows miles and °F; Metric shows kilometres and °C. Tire pressure has its own Auto/PSI/kPa/bar choice: Auto uses PSI for US and kPa for Metric. US is the default when no preset is saved, and existing explicit tire-pressure settings are preserved. Customize widgets also cycles tire units through Auto → PSI → kPa → bar.
+
+For one widget, use `us` or `metric` in its Parameter. An explicit `psi`, `kpa` or `bar` word overrides pressure regardless of preset word order: `metric psi` and `psi metric` both use kilometres/°C with PSI. A preset word leaves an existing explicit pressure choice intact; select Auto for pressure to follow the preset. Unit words do not select or hide fields.
+
+Units apply to all widget families and gallery designs, details, low-tire notices and remote-start temperature/weather prompts. Tire-alert inputs use the selected pressure unit. Switching units reformats saved readings without a network request or a newer measurement time; percentages stay unchanged.
 
 ### Alerts and attention
 
