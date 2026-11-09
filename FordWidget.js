@@ -204,6 +204,13 @@ function finite(value) {
   return Number.isFinite(n) ? n : null;
 }
 function bounded(value, max) { const n = finite(value); return n !== null && n >= 0 && n <= max ? n : null; }
+// Ford can report fuel above 100%; cap the percentage and retain raw data separately.
+// Negative values remain unknown rather than treating a possible sentinel as empty.
+function fordFuelPercent(value) {
+  const raw = finite(value);
+  if (raw === null || raw < 0) return null;
+  return Math.min(raw, 100);
+}
 function timestamp(value) {
   const t = typeof value === 'number' ? value : Date.parse(value);
   return Number.isFinite(t) && t > 0 && t <= now() + 60000 ? t : null;
@@ -811,7 +818,8 @@ function normalize(payload, vin, source, fetchedAt) {
     out[key] = { value, at: timestamp(entry && entry.updateTime) || timestamp(root.updateTime) || null, source, fetchedAt };
   };
   for (const [field, key, max] of [['fuel', 'fuelLevel', 100], ['oil', 'oilLifeRemaining', 100], ['battery', 'batteryStateOfCharge', 100]]) {
-    const e = m[key]; put(field, bounded(e && e.value, max), e);
+    const e = m[key]; put(field, field === 'fuel' ? fordFuelPercent(e && e.value) : bounded(e && e.value, max), e);
+    if (field === 'fuel' && out.fuel) out.fuel.rawValue = finite(e && e.value);
   }
   for (const [field, key] of [['range', 'fuelRange'], ['odometer', 'odometer']]) {
     const e = m[key], v = bounded(e && e.value, 1e8);

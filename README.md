@@ -34,6 +34,8 @@ iPhone Home Screen and Lock Screen widgets for connected Ford vehicles, built as
 
 > The script **must be run in the app first.** Widgets only show what the app has already downloaded.
 
+Ford may report fuel slightly above 100% with a full tank, including when parked on a slope. The displayed fuel percentage is capped at 100%; the original numeric reading and its measurement time remain in the local cache. Negative or invalid fuel readings stay unknown. This fuel-specific handling does not relax oil-life or battery percentage limits.
+
 ### Add a Home Screen widget
 
 1. Long‑press the Home Screen, tap **Edit**, then **Add Widget**, and choose **Scriptable**.
