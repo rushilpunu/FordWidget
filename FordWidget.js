@@ -293,6 +293,27 @@ class LocalStore {
     }
     return null;
   }
+// Move the actual lock before deciding which record may be removed. FileManager
+// has no compare-and-delete operation; a mismatched owner must be restored with
+// a no-clobber copy or retained at the displaced path for safe recovery.
+  retireLease(expected) {
+    const displaced = this.lockPath + '.retired.' + uid();
+    let moved = false;
+    const restore = () => {
+      if (!moved || !this.fm.fileExists(displaced)) return;
+      try {
+        this.fm.copy(displaced, this.lockPath);
+        if (this.fm.readString(this.lockPath) === this.fm.readString(displaced)) this.fm.remove(displaced);
+      } catch (_) { /* Keep the displaced record; never overwrite a new owner. */ }
+    };
+    try {
+      if (this.fm.fileExists(displaced)) return false;
+      this.fm.move(this.lockPath, displaced); moved = true;
+      if (JSON.stringify(this.readFile(displaced)) !== JSON.stringify(expected)) { restore(); return false; }
+      this.fm.remove(displaced);
+      return true;
+    } catch (_) { restore(); return false; }
+  }
   async acquire() {
     requireApp();
     if (!this.fm.fileExists(this.dir)) this.fm.createDirectory(this.dir, true);
@@ -305,13 +326,14 @@ class LocalStore {
         a.addDestructiveAction('Take over'); a.addCancelAction('Cancel');
         if (await a.presentAlert() < 0) throw new Error('Canceled. Another run still owns the app session.');
       }
-      this.fm.remove(this.lockPath);
+      if (!this.retireLease(old)) throw new Error('Another run owns the app session. Try again later.');
     }
     const owner = uid(), temp = this.lockPath + '.' + owner;
     this.fm.writeString(temp, JSON.stringify({ owner, started: now(), until: now() + SETTINGS.lease }));
-    // Native move refuses an existing destination: concurrent app runs fail closed.
-    try { this.fm.move(temp, this.lockPath); this.owner = owner; this.assertLease(); }
-    catch (_) { if (this.fm.fileExists(temp)) this.fm.remove(temp); throw new Error('Another run owns the app session. Try again later.'); }
+    // Native copy refuses an existing destination: concurrent app runs fail closed.
+    try { this.fm.copy(temp, this.lockPath); this.owner = owner; this.assertLease(); }
+    catch (_) { this.owner = null; throw new Error('Another run owns the app session. Try again later.'); }
+    finally { try { if (this.fm.fileExists(temp)) this.fm.remove(temp); } catch (_) {} }
   }
   // Evening check from the widget: never waits, never takes an app run's lock.
   acquireBackground() {
@@ -319,26 +341,26 @@ class LocalStore {
     const old = this.readFile(this.lockPath);
     if (this.fm.fileExists(this.lockPath)) {
       if (old && old.until > now()) return false;
-      this.fm.remove(this.lockPath);
+      if (!this.retireLease(old)) return false;
     }
     const owner = uid(), temp = this.lockPath + '.' + owner;
     this.fm.writeString(temp, JSON.stringify({ owner, started: now(), until: now() + 90000, background: true }));
-    try { this.fm.move(temp, this.lockPath); }
-    catch (_) { if (this.fm.fileExists(temp)) this.fm.remove(temp); return false; }
-    this.owner = owner; this.background = true;
-    return true;
+    try {
+      this.fm.copy(temp, this.lockPath); this.owner = owner; this.background = true; this.assertLease();
+      return true;
+    } catch (_) { this.owner = null; this.background = false; return false; }
+    finally { try { if (this.fm.fileExists(temp)) this.fm.remove(temp); } catch (_) {} }
   }
   assertLease() {
     if (!this.background) requireApp();
     const l = this.readFile(this.lockPath);
     if (!this.owner || !l || l.owner !== this.owner || l.until <= now()) throw new Error('App session expired. Run the script again.');
-    // Sliding lease: an active run keeps ownership; a killed run frees it after `lease`.
-    this.fm.writeString(this.lockPath, JSON.stringify({ owner: this.owner, started: l.started,
-      until: now() + (this.background ? 90000 : SETTINGS.lease), background: !!this.background }));
+    // Ownership is immutable until release/takeover/expiry. A stale run must
+    // never rewrite this shared file and restore itself over a newer owner.
   }
   release() {
     const l = this.readFile(this.lockPath);
-    if (this.owner && l && l.owner === this.owner) this.fm.remove(this.lockPath);
+    if (this.owner && l && l.owner === this.owner) this.retireLease(l);
     this.owner = null; this.background = false;
   }
   imagePath(vin, custom) { return this.fm.joinPath(this.dir, `vehicle_${vin}${custom ? '_custom' : ''}.png`); }

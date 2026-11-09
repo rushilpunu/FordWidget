@@ -73,8 +73,10 @@ function load(source = fs.readFileSync(path.join(__dirname, '../FordWidget.js'),
     fileExists: p => state.files.has(p), createDirectory: p => state.files.set(p, { directory: true }),
     readString: p => { if (!state.files.has(p)) throw new Error('Missing mock file'); return state.files.get(p); },
     writeString: (p, value) => state.files.set(p, String(value)), remove: p => state.files.delete(p),
-    move: (from, to) => { assert.ok(state.files.has(from)); assert.ok(!state.files.has(to), 'Native move refuses an existing destination'); state.files.set(to, state.files.get(from)); state.files.delete(from); },
-    copy: (from, to) => { assert.ok(state.files.has(from)); state.files.set(to, state.files.get(from)); },
+    // Scriptable: move replaces an existing destination; copy refuses one.
+    // https://docs.scriptable.app/filemanager/#-move
+    move: (from, to) => { assert.ok(state.files.has(from)); state.files.set(to, state.files.get(from)); state.files.delete(from); },
+    copy: (from, to) => { assert.ok(state.files.has(from)); assert.ok(!state.files.has(to), 'Native copy refuses an existing destination'); state.files.set(to, state.files.get(from)); },
     readImage: p => state.files.get(p), writeImage: (p, img) => state.files.set(p, img),
   };
   class Alert {

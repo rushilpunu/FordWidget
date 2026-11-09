@@ -141,6 +141,8 @@ Older caches contain only the overall door/lock state. If an older Ajar or Unloc
 
 ## Troubleshooting
 
+Foreground app sessions expire after 15 minutes; evening checks expire after 90 seconds. If a dialog times out, close it and run the script again.
+
 | Problem | Fix |
 |---|---|
 | Ford sign‑in page is blank or stuck on "Signing in" | Wait about 20 seconds, then tap **Close**. The login usually went through. If not, choose **Sign in on another device** and follow the steps; you paste back the `fordapp://` address. |
